@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# The full corpus is supplied in the handout and is only needed to rebuild the
+# offline index locally. The submitted run() path uses artifacts/.
+data/Wikipedia Entries/
