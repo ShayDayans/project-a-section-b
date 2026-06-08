@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import List
 
-from index import build_index
+from index import build_artifacts
 from retrieve import search_batch
 
 
@@ -32,7 +32,7 @@ def run(queries: List[str]) -> List[List[int]]:
 
 def build_offline_index() -> None:
     """Run once locally to create artifacts/ (not timed at grading)."""
-    build_index()
+    build_artifacts()
 
 
 if __name__ == "__main__":

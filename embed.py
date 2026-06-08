@@ -18,6 +18,14 @@ def get_model() -> SentenceTransformer:
     return _model
 
 
+def get_model_device() -> str:
+    model = get_model()
+    device = getattr(model, "device", None)
+    if device is None:
+        device = getattr(model, "_target_device", "unknown")
+    return str(device)
+
+
 def embed_texts(texts: Sequence[str], *, batch_size: int = 64) -> np.ndarray:
     """Return L2-normalized embeddings, shape (n, dim)."""
     if not texts:
