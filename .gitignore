@@ -12,3 +12,4 @@ drive-download-*/
 *.zip
 docs/
 AGENTS.md
+artifacts/experiments/
