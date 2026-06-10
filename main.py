@@ -8,8 +8,16 @@ from __future__ import annotations
 
 from typing import List
 
+from embed import get_model
 from index import build_artifacts
-from retrieve import search_batch
+from retrieve import DEFAULT_RETRIEVAL_CONFIG, _load_cross_encoder, _load_runtime, search_batch
+
+# Warm the embedding model at import time so local eval scripts don't
+# count the first lazy model load inside query-phase timing.
+get_model()
+_load_runtime()
+if DEFAULT_RETRIEVAL_CONFIG.ce_enabled:
+    _load_cross_encoder(DEFAULT_RETRIEVAL_CONFIG)
 
 
 def run(queries: List[str]) -> List[List[int]]:

@@ -1,2 +1,6 @@
 artifacts/*.npy filter=lfs diff=lfs merge=lfs -text
 artifacts/*.json filter=lfs diff=lfs merge=lfs -text
+artifacts/*.faiss filter=lfs diff=lfs merge=lfs -text
+artifacts/*.npz filter=lfs diff=lfs merge=lfs -text
+artifacts/**/*.safetensors filter=lfs diff=lfs merge=lfs -text
+artifacts/**/*.bin filter=lfs diff=lfs merge=lfs -text

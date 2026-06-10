@@ -6,3 +6,9 @@ __pycache__/
 # The full corpus is supplied in the handout and is only needed to rebuild the
 # offline index locally. The submitted run() path uses artifacts/.
 data/Wikipedia Entries/
+artifacts/experiments/.venv/
+artifacts_old/
+drive-download-*/
+*.zip
+docs/
+AGENTS.md

@@ -1,21 +1,52 @@
-"""Embedding utilities (sentence-transformers/all-MiniLM-L6-v2 only)."""
+"""Embedding utilities for the bundled all-MiniLM-L6-v2 model."""
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import List, Sequence
 
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
-from utils import EMBEDDING_MODEL_NAME
+from utils import ARTIFACTS_DIR, EMBEDDING_MODEL_NAME
 
 _model: SentenceTransformer | None = None
+
+_LOCAL_MODEL_DIR = ARTIFACTS_DIR / "models" / "all-MiniLM-L6-v2"
+
+
+def _resolve_model_device() -> str:
+    preferred = os.environ.get("SBERT_DEVICE")
+    if preferred:
+        return preferred
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "cuda"
+    except Exception:
+        pass
+    return "cpu"
 
 
 def get_model() -> SentenceTransformer:
     global _model
     if _model is None:
-        _model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+        model_source = str(_resolve_model_path())
+        _model = SentenceTransformer(
+            model_source,
+            device=_resolve_model_device(),
+        )
     return _model
+
+
+def _resolve_model_path() -> Path:
+    if _LOCAL_MODEL_DIR.exists():
+        return _LOCAL_MODEL_DIR
+    raise FileNotFoundError(
+        "Bundled embedding model not found at "
+        f"{_LOCAL_MODEL_DIR}. Save {EMBEDDING_MODEL_NAME} there before running."
+    )
 
 
 def get_model_device() -> str:
