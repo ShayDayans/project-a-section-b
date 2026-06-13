@@ -1,4 +1,4 @@
-"""Query-time hybrid retrieval and page aggregation."""
+"""Query-time hybrid retrieval - best config, CE on unique pages, fallback padding."""
 from __future__ import annotations
 
 import os
@@ -16,13 +16,14 @@ from embed import embed_queries
 from index import load_dense_index, load_dense_metadata
 from utils import K_EVAL, tokenize_text
 
+
 @dataclass(frozen=True)
 class RetrievalConfig:
     dense_top_k: int = 120
     bm25_top_k: int = 160
     rrf_k: int = 5
-    bm25_base_weight: float = 1.50
-    bm25_boost_cap: float = 0.30
+    bm25_base_weight: float = 2.0
+    bm25_boost_cap: float = 0.3
     fused_weight: float = 0.20
     dense_score_weight: float = 0.24
     bm25_score_weight: float = 0.24
@@ -32,11 +33,10 @@ class RetrievalConfig:
     numeric_match_weight: float = 0.30
     page_second_weight: float = 0.0
     page_third_weight: float = 0.0
-    ce_enabled: bool = True
-    ce_top_k: int = 100
-    ce_weight: float = 0.60
+    ce_top_k: int = 10
+    ce_weight: float = 1
     ce_batch_size: int = 32
-    ce_model_path: str = "artifacts/cross_encoder/ms-marco-MiniLM-L6-v2"
+    ce_model_path: str = "artifacts/cross_encoder/ms-marco-MiniLM-L12-v2"
 
 
 DEFAULT_RETRIEVAL_CONFIG = RetrievalConfig()
@@ -96,7 +96,6 @@ def _resolve_model_device() -> str:
         return preferred
     try:
         import torch
-
         if torch.cuda.is_available():
             return "cuda"
     except Exception:
@@ -118,16 +117,11 @@ def _load_cross_encoder(config: RetrievalConfig) -> Any:
         return cached
     if not model_path.exists():
         raise FileNotFoundError(
-            "Cross-encoder model directory not found at "
-            f"{model_path}. Bundle the model under artifacts/ or disable ce_enabled."
+            f"Cross-encoder model not found at {model_path}. "
+            "Bundle the model under artifacts/cross_encoder/."
         )
-
     from sentence_transformers import CrossEncoder
-
-    model = CrossEncoder(
-        str(model_path),
-        device=_resolve_model_device(),
-    )
+    model = CrossEncoder(str(model_path), device=_resolve_model_device())
     _CROSS_ENCODER_CACHE[model_path] = model
     return model
 
@@ -151,9 +145,7 @@ def _load_runtime(artifacts_dir: Optional[Path] = None) -> dict[str, object]:
     bm25 = load_bm25(root)
 
     if len(dense_metadata) != len(bm25.chunk_metadata):
-        raise ValueError(
-            "Dense and BM25 artifacts are misaligned: chunk counts differ at query time"
-        )
+        raise ValueError("Dense and BM25 artifacts are misaligned: chunk counts differ")
 
     chunk_lookup: List[Dict[str, object]] = []
     for idx, dense_chunk in enumerate(dense_metadata):
@@ -161,49 +153,32 @@ def _load_runtime(artifacts_dir: Optional[Path] = None) -> dict[str, object]:
         page_id = int(dense_chunk["page_id"])
         bm25_page_id = int(bm25_chunk["page_id"])
         if page_id != bm25_page_id:
-            raise ValueError(
-                "Dense and BM25 artifacts are misaligned: page_id mismatch in chunk order"
-            )
-
+            raise ValueError("Dense and BM25 artifacts are misaligned: page_id mismatch")
         title = str(dense_chunk.get("title", bm25_chunk.get("title", "")))
         chunk_text = str(dense_chunk.get("chunk_text", ""))
         full_text = _normalize_text(f"{title} {chunk_text}")
-        chunk_lookup.append(
-            {
-                "page_id": page_id,
-                "title": title,
-                "chunk_text": chunk_text,
-                "title_tokens": set(_tokenize_match(title)),
-                "chunk_tokens": set(_tokenize_match(chunk_text)),
-                "full_text": full_text,
-            }
-        )
+        chunk_lookup.append({
+            "page_id": page_id,
+            "title": title,
+            "chunk_text": chunk_text,
+            "title_tokens": set(_tokenize_match(title)),
+            "chunk_tokens": set(_tokenize_match(chunk_text)),
+            "full_text": full_text,
+        })
 
-    runtime = {
-        "dense_index": dense_index,
-        "bm25": bm25,
-        "chunks": chunk_lookup,
-    }
+    runtime = {"dense_index": dense_index, "bm25": bm25, "chunks": chunk_lookup}
     _CACHE[root] = runtime
     return runtime
 
 
-def _query_lexical_profile(
-    query: str,
-    bm25: BM25,
-    config: RetrievalConfig,
-) -> dict[str, object]:
+def _query_lexical_profile(query: str, bm25: BM25, config: RetrievalConfig) -> dict[str, object]:
     raw_tokens = [token.lower() for token in tokenize_text(query) if token.strip()]
     match_tokens = _tokenize_match(query)
     unique_match_tokens = list(dict.fromkeys(match_tokens))
     quoted_phrases = _extract_quoted_phrases(query)
     digit_tokens = [token for token in unique_match_tokens if any(ch.isdigit() for ch in token)]
 
-    idfs = [
-        float(bm25.postings[token].idf)
-        for token in unique_match_tokens
-        if token in bm25.postings
-    ]
+    idfs = [float(bm25.postings[token].idf) for token in unique_match_tokens if token in bm25.postings]
     if idfs:
         rare_signal = min(float(np.mean(sorted(idfs, reverse=True)[:3])) / 6.0, 1.0)
     else:
@@ -232,21 +207,10 @@ def _query_lexical_profile(
     }
 
 
-def _dense_search(
-    query_vectors: np.ndarray,
-    dense_index: object,
-    *,
-    dense_top_k: int,
-) -> Tuple[np.ndarray, np.ndarray]:
+def _dense_search(query_vectors: np.ndarray, dense_index: object, *, dense_top_k: int) -> Tuple[np.ndarray, np.ndarray]:
     if query_vectors.size == 0:
-        return (
-            np.zeros((0, dense_top_k), dtype=np.float32),
-            np.zeros((0, dense_top_k), dtype=np.int64),
-        )
-    scores, indices = dense_index.search(
-        np.ascontiguousarray(query_vectors, dtype=np.float32),
-        dense_top_k,
-    )
+        return (np.zeros((0, dense_top_k), dtype=np.float32), np.zeros((0, dense_top_k), dtype=np.int64))
+    scores, indices = dense_index.search(np.ascontiguousarray(query_vectors, dtype=np.float32), dense_top_k)
     return scores, indices
 
 
@@ -283,10 +247,7 @@ def _rrf_scores(
     return ordered_candidates, fused_scores, dense_score_map, bm25_score_map
 
 
-def _chunk_feature_score(
-    chunk: Dict[str, object],
-    profile: dict[str, object],
-) -> Tuple[float, float, float, float]:
+def _chunk_feature_score(chunk: Dict[str, object], profile: dict[str, object]) -> Tuple[float, float, float, float]:
     query_tokens = profile["query_tokens"]
     title_tokens = chunk["title_tokens"]
     chunk_tokens = chunk["chunk_tokens"]
@@ -331,15 +292,12 @@ def _rerank_candidates(
         return []
 
     dense_norm = _normalize_feature([dense_score_map.get(idx, 0.0) for idx in candidate_indices])
-    bm25_norm = _normalize_feature([bm25_score_map.get(idx, 0.0) for idx in candidate_indices])
+    bm25_norm  = _normalize_feature([bm25_score_map.get(idx, 0.0) for idx in candidate_indices])
     fused_norm = _normalize_feature([fused_scores.get(idx, 0.0) for idx in candidate_indices])
 
     reranked: List[Tuple[int, float]] = []
     for pos, chunk_idx in enumerate(candidate_indices):
-        title_overlap, chunk_overlap, phrase_match, numeric_match = _chunk_feature_score(
-            chunks[chunk_idx],
-            profile,
-        )
+        title_overlap, chunk_overlap, phrase_match, numeric_match = _chunk_feature_score(chunks[chunk_idx], profile)
         linear_score = (
             config.dense_score_weight * float(dense_norm[pos])
             + config.bm25_score_weight * float(bm25_norm[pos])
@@ -348,9 +306,7 @@ def _rerank_candidates(
             + config.phrase_match_weight * phrase_match
             + config.numeric_match_weight * numeric_match
         )
-        final_score = config.fused_weight * float(fused_norm[pos]) + (
-            1.0 - config.fused_weight
-        ) * linear_score
+        final_score = config.fused_weight * float(fused_norm[pos]) + (1.0 - config.fused_weight) * linear_score
         reranked.append((chunk_idx, final_score))
 
     reranked.sort(key=lambda item: (-item[1], item[0]))
@@ -363,7 +319,8 @@ def _rerank_with_cross_encoder(
     chunks: Sequence[Dict[str, object]],
     config: RetrievalConfig,
 ) -> List[Tuple[int, float]]:
-    if not config.ce_enabled or not reranked_chunks:
+    """CE reranking on top-k UNIQUE PAGES (one representative chunk per page)."""
+    if not reranked_chunks:
         return list(reranked_chunks)
 
     ce_top_k = min(max(int(config.ce_top_k), 0), len(reranked_chunks))
@@ -371,31 +328,31 @@ def _rerank_with_cross_encoder(
         return list(reranked_chunks)
 
     cross_encoder = _load_cross_encoder(config)
-    head = list(reranked_chunks[:ce_top_k])
-    tail = list(reranked_chunks[ce_top_k:])
+    seen_pages: set[int] = set()
+    head: List[Tuple[int, float]] = []
+    tail: List[Tuple[int, float]] = []
 
-    pairs = [
-        (query, _chunk_text_for_cross_encoder(chunks[chunk_idx]))
-        for chunk_idx, _ in head
-    ]
+    for chunk_idx, score in reranked_chunks:
+        page_id = int(chunks[chunk_idx]["page_id"])
+        if page_id not in seen_pages and len(seen_pages) < ce_top_k:
+            seen_pages.add(page_id)
+            head.append((chunk_idx, score))
+        else:
+            tail.append((chunk_idx, score))
+
+    pairs = [(query, _chunk_text_for_cross_encoder(chunks[chunk_idx])) for chunk_idx, _ in head]
     ce_scores = np.asarray(
-        cross_encoder.predict(
-            pairs,
-            batch_size=max(int(config.ce_batch_size), 1),
-            show_progress_bar=False,
-        ),
+        cross_encoder.predict(pairs, batch_size=max(int(config.ce_batch_size), 1), show_progress_bar=False),
         dtype=np.float32,
     ).reshape(-1)
 
     base_norm = _normalize_feature([score for _, score in head])
-    ce_norm = _normalize_feature(ce_scores.tolist())
+    ce_norm   = _normalize_feature(ce_scores.tolist())
     ce_weight = min(max(float(config.ce_weight), 0.0), 1.0)
 
     rescored_head: List[Tuple[int, float]] = []
     for pos, (chunk_idx, _) in enumerate(head):
-        blended_score = ((1.0 - ce_weight) * float(base_norm[pos])) + (
-            ce_weight * float(ce_norm[pos])
-        )
+        blended_score = (1.0 - ce_weight) * float(base_norm[pos]) + ce_weight * float(ce_norm[pos])
         rescored_head.append((chunk_idx, blended_score))
 
     reranked = rescored_head + tail
@@ -437,21 +394,19 @@ def search_batch(
     artifacts_dir: Optional[Path] = None,
     config: Optional[RetrievalConfig] = None,
 ) -> List[List[int]]:
-    """Hybrid dense + BM25 chunk retrieval with page-level score aggregation."""
-    config = config or DEFAULT_RETRIEVAL_CONFIG
+    """Hybrid dense+BM25 retrieval, CE on unique pages, fallback padding."""
+    config  = config or DEFAULT_RETRIEVAL_CONFIG
     runtime = _load_runtime(artifacts_dir)
     dense_index = runtime["dense_index"]
-    bm25: BM25 = runtime["bm25"]  # type: ignore[assignment]
-    chunks = runtime["chunks"]
+    bm25: BM25  = runtime["bm25"]
+    chunks      = runtime["chunks"]
 
     if not queries:
         return []
 
     query_vectors = embed_queries(queries)
     dense_scores_batch, dense_indices_batch = _dense_search(
-        query_vectors,
-        dense_index,
-        dense_top_k=config.dense_top_k,
+        query_vectors, dense_index, dense_top_k=config.dense_top_k
     )
 
     ranked_pages: List[List[int]] = []
@@ -460,7 +415,7 @@ def search_batch(
 
         bm25_indices, bm25_scores = bm25.search(query, top_k=config.bm25_top_k)
         dense_indices = dense_indices_batch[query_idx]
-        dense_scores = dense_scores_batch[query_idx]
+        dense_scores  = dense_scores_batch[query_idx]
 
         candidate_indices, fused_scores, dense_score_map, bm25_score_map = _rrf_scores(
             dense_indices=dense_indices,
@@ -473,28 +428,31 @@ def search_batch(
         )
 
         reranked_chunks = _rerank_candidates(
-            candidate_indices,
-            fused_scores,
-            dense_score_map,
-            bm25_score_map,
-            chunks,
-            profile,
-            config,
+            candidate_indices, fused_scores, dense_score_map,
+            bm25_score_map, chunks, profile, config,
         )
-        reranked_chunks = _rerank_with_cross_encoder(
-            query,
-            reranked_chunks,
-            chunks,
-            config,
+
+        pre_ce_chunks: List[Tuple[int, float]] = list(reranked_chunks)
+
+        reranked_chunks = _rerank_with_cross_encoder(query, reranked_chunks, chunks, config)
+
+        final_pages: List[int] = _aggregate_pages(
+            reranked_chunks, chunks,
+            top_k=top_k,
+            page_second_weight=config.page_second_weight,
+            page_third_weight=config.page_third_weight,
         )
-        ranked_pages.append(
-            _aggregate_pages(
-                reranked_chunks,
-                chunks,
-                top_k=top_k,
-                page_second_weight=config.page_second_weight,
-                page_third_weight=config.page_third_weight,
-            )
-        )
+
+        if len(final_pages) < top_k:
+            seen: set = set(final_pages)
+            for chunk_idx, _ in pre_ce_chunks:
+                if len(final_pages) >= top_k:
+                    break
+                page_id = int(chunks[chunk_idx]["page_id"])
+                if page_id not in seen:
+                    final_pages.append(page_id)
+                    seen.add(page_id)
+
+        ranked_pages.append(final_pages)
 
     return ranked_pages
