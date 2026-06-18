@@ -16,8 +16,7 @@ from retrieve import DEFAULT_RETRIEVAL_CONFIG, _load_cross_encoder, _load_runtim
 # count the first lazy model load inside query-phase timing.
 get_model()
 _load_runtime()
-if DEFAULT_RETRIEVAL_CONFIG.ce_enabled:
-    _load_cross_encoder(DEFAULT_RETRIEVAL_CONFIG)
+_load_cross_encoder(DEFAULT_RETRIEVAL_CONFIG)
 
 
 def run(queries: List[str]) -> List[List[int]]:
@@ -46,3 +45,4 @@ def build_offline_index() -> None:
 if __name__ == "__main__":
     build_offline_index()
     print("Index built under artifacts/. Run: python scripts/eval_public.py")
+    
