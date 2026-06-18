@@ -3,7 +3,7 @@ End-to-end page retrieval system for the course project.
 
 Link to the video: https://technionmail-my.sharepoint.com/:f:/g/personal/shay_dayan_campus_technion_ac_il/IgBOfEl6DJDiToeAKrCB3QjVAZXNJmxwzoyE7jy-D3qe4rI?e=eFto5j 
 
-The autograder imports:
+The autograder imports
 `main.py` and calls:
 
 ```python
